@@ -1,7 +1,7 @@
 import SwiftUI
 
-struct PlanItem: Identifiable {
-    let id = UUID()
+struct PlanItem: Identifiable, Codable {
+    var id = UUID()
     let task: String
     let date: Date
     let startTime: Int
@@ -9,7 +9,8 @@ struct PlanItem: Identifiable {
     let priority: Int
 }
 
-var plans = [
+// test data, shown when the server can't be reached
+let samplePlans = [
     PlanItem(
         task: "운영체제 과제",
         date: Date(),
@@ -54,7 +55,27 @@ var plans = [
     )
 ]
 
-//tbd, collect form db
+// Server address. In the Simulator, 127.0.0.1 (localhost) is your Mac.
+// On a real iPhone, use your Mac's IP address instead (e.g. http://192.168.0.12:8000).
+let serverURL = URL(string: "http://127.0.0.1:8000")!
+
+// JSON from the server uses snake_case keys and "yyyy-MM-dd" dates
+let planDecoder: JSONDecoder = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    let decoder = JSONDecoder()
+    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    decoder.dateDecodingStrategy = .formatted(formatter)
+    return decoder
+}()
+
+func fetchPlans() async throws -> [PlanItem] {
+    let url = serverURL.appendingPathComponent("plans")
+    let (data, _) = try await URLSession.shared.data(from: url)
+    return try planDecoder.decode([PlanItem].self, from: data)
+}
+
 //automatically sorted
 
 struct ContentView: View {
@@ -82,6 +103,8 @@ struct ContentView: View {
 
 struct MainView: View {
     @State private var scrollPosition = ScrollPosition()
+    @State private var plans: [PlanItem] = samplePlans
+    @State private var serverStatus = "Connecting to server..."
     
     var day: String {
         let month = Calendar.current.component(.month, from: Date())
@@ -113,6 +136,13 @@ struct MainView: View {
 
             Text("today's plan")
                 .foregroundColor(.secondary)
+
+            // shows whether plans came from the server or the sample data
+            Text(serverStatus)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
 
             TimelineView(.periodic(from: .now, by: 60)) { context in
                 
@@ -211,6 +241,23 @@ struct MainView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.white)
+        .task {
+            // reload every 1 seconds so new plans show up without restarting
+            while !Task.isCancelled {
+                await loadPlans()
+                try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    private func loadPlans() async {
+        do {
+            plans = try await fetchPlans()
+            serverStatus = "Server: \(plans.count) plan(s) loaded"
+        } catch {
+            // keep the plans we already have (sample plans if nothing loaded yet)
+            serverStatus = "Server error: \(error)"
+        }
     }
 }
 
