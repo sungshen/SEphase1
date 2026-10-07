@@ -70,12 +70,148 @@ let planDecoder: JSONDecoder = {
     return decoder
 }()
 
-func fetchPlans() async throws -> [PlanItem] {
-    let url = serverURL.appendingPathComponent("plans")
-    let (data, _) = try await URLSession.shared.data(from: url)
-    return try planDecoder.decode([PlanItem].self, from: data)
+func fetchPlans(for date: Date) async throws -> [PlanItem] {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+
+    var components = URLComponents(
+        url: serverURL.appendingPathComponent("plans"),
+        resolvingAgainstBaseURL: false
+    )!
+
+    components.queryItems = [
+        URLQueryItem(
+            name: "date",
+            value: formatter.string(from: date)
+        )
+    ]
+
+    let (data, _) = try await URLSession.shared.data(
+        from: components.url!
+    )
+
+    return try planDecoder.decode(
+        [PlanItem].self,
+        from: data
+    )
 }
 
+
+// 새 일정 추가
+func createPlan(_ plan: PlanItem) async throws -> PlanItem {
+    let url = serverURL.appendingPathComponent("plans")
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+
+    request.setValue(
+        "application/json",
+        forHTTPHeaderField: "Content-Type"
+    )
+
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+
+    encoder.dateEncodingStrategy = .formatted(formatter)
+
+    request.httpBody = try encoder.encode(plan)
+
+    let (data, response) = try await URLSession.shared.data(
+        for: request
+    )
+
+    guard let httpResponse = response as? HTTPURLResponse,
+          (200...299).contains(httpResponse.statusCode)
+    else {
+        throw URLError(.badServerResponse)
+    }
+
+    return try planDecoder.decode(
+        PlanItem.self,
+        from: data
+    )
+}
+
+
+// 기존 일정 수정
+func updatePlan(_ plan: PlanItem) async throws -> PlanItem {
+    let url = serverURL
+        .appendingPathComponent("plans")
+        .appendingPathComponent(plan.id.uuidString)
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "PUT"
+
+    request.setValue(
+        "application/json",
+        forHTTPHeaderField: "Content-Type"
+    )
+
+    let encoder = JSONEncoder()
+    encoder.keyEncodingStrategy = .convertToSnakeCase
+
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyy-MM-dd"
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+
+    encoder.dateEncodingStrategy = .formatted(formatter)
+
+    request.httpBody = try encoder.encode(plan)
+
+    let (data, response) = try await URLSession.shared.data(
+        for: request
+    )
+
+    guard let httpResponse = response as? HTTPURLResponse,
+          (200...299).contains(httpResponse.statusCode)
+    else {
+        throw URLError(.badServerResponse)
+    }
+
+    return try planDecoder.decode(
+        PlanItem.self,
+        from: data
+    )
+}
+
+
+// 일정 삭제
+func deletePlan(_ plan: PlanItem) async throws {
+    let url = serverURL
+        .appendingPathComponent("plans")
+        .appendingPathComponent(plan.id.uuidString)
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "DELETE"
+
+    let (_, response) = try await URLSession.shared.data(
+        for: request
+    )
+
+    guard let httpResponse = response as? HTTPURLResponse,
+          (200...299).contains(httpResponse.statusCode)
+    else {
+        throw URLError(.badServerResponse)
+    }
+}
+
+func fetchAllPlans() async throws -> [PlanItem] {
+    let url = serverURL.appendingPathComponent("plans")
+
+    let (data, _) = try await URLSession.shared.data(
+        from: url
+    )
+
+    return try planDecoder.decode(
+        [PlanItem].self,
+        from: data
+    )
+}
 //automatically sorted
 
 struct ContentView: View {
@@ -244,18 +380,17 @@ struct MainView: View {
         .task {
             // reload every 1 seconds so new plans show up without restarting
             while !Task.isCancelled {
-                await loadPlans()
+                await loadPlans(for: Date())
                 try? await Task.sleep(for: .seconds(1))
             }
         }
     }
 
-    private func loadPlans() async {
+    private func loadPlans(for date: Date) async {
         do {
-            plans = try await fetchPlans()
+            plans = try await fetchPlans(for: date)
             serverStatus = "Server: \(plans.count) plan(s) loaded"
         } catch {
-            // keep the plans we already have (sample plans if nothing loaded yet)
             serverStatus = "Server error: \(error)"
         }
     }
@@ -393,8 +528,11 @@ struct PlanningView: View {
 
 
 struct CalendarPage: View {
+    @State private var plans: [PlanItem] = []
     @State private var currentMonth = Date()
     @State private var selectedDate = Calendar.current.startOfDay(for: Date())
+    @State private var showingCreateSheet = false
+    @State private var selectedPlan: PlanItem?
 
     private let calendar = Calendar.current
     private let columns = Array(
@@ -441,6 +579,10 @@ struct CalendarPage: View {
 
                         Button {
                             selectedDate = date
+
+                            Task {
+                                await loadPlans(for: date)
+                            }
                         } label: {
                             Text("\(calendar.component(.day, from: date))")
                                 .frame(maxWidth: .infinity)
@@ -460,14 +602,89 @@ struct CalendarPage: View {
                     }
                 }
             }
-            Spacer()
             Text("Date: \(selectedDate.formatted(.dateTime.year().month().day()))")
-            .font(.headline)
+                .font(.headline)
+
+            Button {
+                showingCreateSheet = true
+            } label: {
+                Text("+ ADD PLAN")
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 50)
+                    .background(Color.black)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
+
+            ScrollView {
+                LazyVStack(spacing: 12) {
+                    ForEach(plans) { plan in
+                        Button {
+                            selectedPlan = plan
+                        } label: {
+                            HStack {
+                                Text(plan.task)
+                                    .font(.system(size: 18))
+                                    .foregroundStyle(.primary)
+
+                                Spacer()
+
+                                Text(
+                                    String(
+                                        format: "%02d:%02d - %02d:%02d",
+                                        plan.startTime / 60,
+                                        plan.startTime % 60,
+                                        plan.endTime / 60,
+                                        plan.endTime % 60
+                                    )
+                                )
+                                .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(height: 60)
+                            .background(Color(white: 0.95))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
             
 
             
         }
         .padding()
+        .sheet(isPresented: $showingCreateSheet) {
+            CreatePlanView(
+                date: selectedDate,
+                onCreated: {
+                    Task {
+                        await loadPlans(for: selectedDate)
+                    }
+                }
+            )
+        }
+        .sheet(item: $selectedPlan) { plan in
+            EditPlanView(
+                plan: plan,
+                onUpdated: {
+                    Task {
+                        await loadPlans(for: selectedDate)
+                    }
+                },
+                onDeleted: {
+                    Task {
+                        await loadPlans(for: selectedDate)
+                    }
+                }
+            )
+        }
+    }
+    private func loadPlans(for date: Date) async {
+        do {
+            plans = try await fetchPlans(for: date)
+        } catch {
+        }
     }
 
     private func changeMonth(by amount: Int) {
@@ -520,15 +737,124 @@ struct CalendarPage: View {
 }
 
 struct AllPlansPage: View {
+
+    @State private var plans: [PlanItem] = []
+    @State private var selectedPlan: PlanItem?
+    @State private var serverStatus = "Loading..."
+
     var body: some View {
-        VStack {
+        VStack(spacing: 16) {
+
             Text("ALL PLANS")
                 .font(.largeTitle.bold())
-            Spacer()
+
+            Text(serverStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            ScrollView {
+                LazyVStack(spacing: 12) {
+
+                    ForEach(
+                        plans.sorted {
+                            if $0.date != $1.date {
+                                return $0.date < $1.date
+                            }
+
+                            if $0.startTime != $1.startTime {
+                                return $0.startTime < $1.startTime
+                            }
+
+                            return $0.priority > $1.priority
+                        }
+                    ) { plan in
+
+                        Button {
+                            selectedPlan = plan
+                        } label: {
+
+                            VStack(alignment: .leading, spacing: 6) {
+
+                                HStack {
+                                    Text(plan.task)
+                                        .font(.system(size: 18))
+
+                                    Spacer()
+
+                                    Text("P\(plan.priority)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                HStack {
+                                    Text(
+                                        plan.date.formatted(
+                                            .dateTime
+                                                .year()
+                                                .month()
+                                                .day()
+                                        )
+                                    )
+
+                                    Spacer()
+
+                                    Text(
+                                        String(
+                                            format: "%02d:%02d - %02d:%02d",
+                                            plan.startTime / 60,
+                                            plan.startTime % 60,
+                                            plan.endTime / 60,
+                                            plan.endTime % 60
+                                        )
+                                    )
+                                    .foregroundStyle(.secondary)
+                                }
+                                .font(.system(size: 14))
+                            }
+                            .padding(.horizontal, 16)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 72)
+                            .background(Color(white: 0.95))
+                            .clipShape(
+                                RoundedRectangle(cornerRadius: 12)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+            }
+        }
+        .padding(.top)
+        .task {
+            await loadPlans()
+        }
+        .sheet(item: $selectedPlan) { plan in
+            EditPlanView(
+                plan: plan,
+                onUpdated: {
+                    Task {
+                        await loadPlans()
+                    }
+                },
+                onDeleted: {
+                    Task {
+                        await loadPlans()
+                    }
+                }
+            )
+        }
+    }
+
+    private func loadPlans() async {
+        do {
+            plans = try await fetchAllPlans()
+            serverStatus = "Server: \(plans.count) plan(s) loaded"
+        } catch {
+            serverStatus = "Server error: \(error)"
         }
     }
 }
-
 struct BottomPageBar: View {
     @Binding var page: Int
 
@@ -632,6 +958,328 @@ struct TaskCard: View {
         .frame(maxWidth: .infinity)
         .background(progress_c)
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+struct CreatePlanView: View {
+
+    let date: Date
+    let onCreated: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var task = ""
+    @State private var startTime = 20 * 60
+    @State private var endTime = 21 * 60
+    @State private var priority = 1
+    @State private var isSaving = false
+    @State private var errorMessage = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+
+                Section("Plan") {
+                    TextField("Task name", text: $task)
+
+                    DatePicker(
+                        "Start",
+                        selection: Binding(
+                            get: {
+                                dateFromMinutes(startTime)
+                            },
+                            set: {
+                                startTime = minutesFromDate($0)
+                            }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+
+                    DatePicker(
+                        "End",
+                        selection: Binding(
+                            get: {
+                                dateFromMinutes(endTime)
+                            },
+                            set: {
+                                endTime = minutesFromDate($0)
+                            }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+
+                    Stepper(
+                        "Priority: \(priority)",
+                        value: $priority,
+                        in: 1...5
+                    )
+                }
+
+                if !errorMessage.isEmpty {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Section {
+                    Button {
+                        Task {
+                            await savePlan()
+                        }
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text("CREATE")
+                        }
+                    }
+                    .disabled(
+                        task.trimmingCharacters(in: .whitespaces).isEmpty
+                        || isSaving
+                        || startTime >= endTime
+                    )
+                }
+            }
+            .navigationTitle("New Plan")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private func dateFromMinutes(_ minutes: Int) -> Date {
+        var components = Calendar.current.dateComponents(
+            [.year, .month, .day],
+            from: date
+        )
+
+        components.hour = minutes / 60
+        components.minute = minutes % 60
+
+        return Calendar.current.date(from: components) ?? date
+    }
+
+    private func minutesFromDate(_ date: Date) -> Int {
+        Calendar.current.component(.hour, from: date) * 60
+        + Calendar.current.component(.minute, from: date)
+    }
+
+    private func savePlan() async {
+
+        guard startTime < endTime else {
+            errorMessage = "End time must be later than start time."
+            return
+        }
+
+        isSaving = true
+        errorMessage = ""
+
+        let plan = PlanItem(
+            task: task,
+            date: date,
+            startTime: startTime,
+            endTime: endTime,
+            priority: priority
+        )
+
+        do {
+            _ = try await createPlan(plan)
+
+            onCreated()
+            dismiss()
+
+        } catch {
+            errorMessage = "Failed to create plan: \(error)"
+        }
+
+        isSaving = false
+    }
+}
+struct EditPlanView: View {
+
+    let plan: PlanItem
+    let onUpdated: () -> Void
+    let onDeleted: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var task: String
+    @State private var startTime: Int
+    @State private var endTime: Int
+    @State private var priority: Int
+
+    @State private var isSaving = false
+    @State private var errorMessage = ""
+
+    init(
+        plan: PlanItem,
+        onUpdated: @escaping () -> Void,
+        onDeleted: @escaping () -> Void
+    ) {
+        self.plan = plan
+        self.onUpdated = onUpdated
+        self.onDeleted = onDeleted
+
+        _task = State(initialValue: plan.task)
+        _startTime = State(initialValue: plan.startTime)
+        _endTime = State(initialValue: plan.endTime)
+        _priority = State(initialValue: plan.priority)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+
+                Section("Plan") {
+
+                    TextField(
+                        "Task name",
+                        text: $task
+                    )
+
+                    DatePicker(
+                        "Start",
+                        selection: Binding(
+                            get: {
+                                dateFromMinutes(startTime)
+                            },
+                            set: {
+                                startTime = minutesFromDate($0)
+                            }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+
+                    DatePicker(
+                        "End",
+                        selection: Binding(
+                            get: {
+                                dateFromMinutes(endTime)
+                            },
+                            set: {
+                                endTime = minutesFromDate($0)
+                            }
+                        ),
+                        displayedComponents: .hourAndMinute
+                    )
+
+                    Stepper(
+                        "Priority: \(priority)",
+                        value: $priority,
+                        in: 1...5
+                    )
+                }
+
+                if !errorMessage.isEmpty {
+                    Section {
+                        Text(errorMessage)
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                Section {
+
+                    Button {
+                        Task {
+                            await update()
+                        }
+                    } label: {
+                        if isSaving {
+                            ProgressView()
+                        } else {
+                            Text("UPDATE")
+                        }
+                    }
+                    .disabled(
+                        task.trimmingCharacters(in: .whitespaces).isEmpty
+                        || startTime >= endTime
+                        || isSaving
+                    )
+                }
+
+                Section {
+
+                    Button(role: .destructive) {
+                        Task {
+                            await delete()
+                        }
+                    } label: {
+                        Text("DELETE")
+                    }
+                    .disabled(isSaving)
+                }
+            }
+            .navigationTitle("Edit Plan")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private func dateFromMinutes(_ minutes: Int) -> Date {
+        var components = Calendar.current.dateComponents(
+            [.year, .month, .day],
+            from: plan.date
+        )
+
+        components.hour = minutes / 60
+        components.minute = minutes % 60
+
+        return Calendar.current.date(
+            from: components
+        ) ?? plan.date
+    }
+
+    private func minutesFromDate(_ date: Date) -> Int {
+        Calendar.current.component(.hour, from: date) * 60
+        + Calendar.current.component(.minute, from: date)
+    }
+
+    private func update() async {
+
+        guard startTime < endTime else {
+            errorMessage = "End time must be later than start time."
+            return
+        }
+
+        isSaving = true
+        errorMessage = ""
+
+        let updatedPlan = PlanItem(
+            id: plan.id,
+            task: task,
+            date: plan.date,
+            startTime: startTime,
+            endTime: endTime,
+            priority: priority
+        )
+
+        do {
+            _ = try await updatePlan(updatedPlan)
+
+            onUpdated()
+            dismiss()
+
+        } catch {
+            errorMessage = "Failed to update plan: \(error)"
+        }
+
+        isSaving = false
+    }
+
+    private func delete() async {
+
+        isSaving = true
+        errorMessage = ""
+
+        do {
+            try await deletePlan(plan)
+
+            onDeleted()
+            dismiss()
+
+        } catch {
+            errorMessage = "Failed to delete plan: \(error)"
+        }
+
+        isSaving = false
     }
 }
 
